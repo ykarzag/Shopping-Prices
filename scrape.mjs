@@ -138,11 +138,8 @@ async function cerberus(username, storeId) {
   const { files, get } = await cerberusSession(username);
   let full = files.filter((n) => /pricefull/i.test(n));
   if (storeId) {
-    const padded = String(storeId).padStart(3, "0");
-    const forStore = full.filter((n) => {
-      const segs = n.split(/[-.]/);
-      return segs.includes(padded) || segs.includes(String(storeId));
-    });
+    const v = new Set([String(storeId), String(Number(storeId)), String(storeId).padStart(3, "0"), String(storeId).padStart(4, "0")]);
+    const forStore = full.filter((n) => n.split(/[-.]/).some((s) => v.has(s)));
     if (forStore.length) full = forStore;
   }
   full.sort();
@@ -275,10 +272,12 @@ ${lines}`;
   return JSON.parse((await res.json()).choices[0].message.content);
 }
 
+// Store selection — branches near Kiryat Tivon:
+//   Shufersal 98 = דיל קרית טבעון אלונים · Rami Levy 062 = צק פוסט חיפה · Yohananof 013 = חוצות המפרץ
 const CHAINS = [
-  ["שופרסל", shufersal],
-  ["רמי לוי", () => cerberus("RamiLevi")],
-  ["יוחננוף", () => cerberus("yohananof")],
+  ["שופרסל", () => shufersal(98)],
+  ["רמי לוי", () => cerberus("RamiLevi", "062")],
+  ["יוחננוף", () => cerberus("yohananof", "013")],
 ];
 
 // Store discovery mode: find the user's branches and their StoreIds.
