@@ -134,34 +134,96 @@ async function carrefour() {
   );
 }
 
-// ---- run all, report ----
-const TERMS = ["בצל", "חלב", "עגבני"];
-const chains = [
+// ================= pipeline =================
+const FB_PROJECT = "shoppingcart300626";
+const FB_KEY = "AIzaSyAB_l1XWmRRSsd9K_Fw_pXc8ARE4EV5kFE"; // public web config key
+const FS = `https://firestore.googleapis.com/v1/projects/${FB_PROJECT}/databases/(default)/documents`;
+
+// Encode a JS value into Firestore REST typed format.
+function fsValue(v) {
+  if (v === null || v === undefined) return { nullValue: null };
+  if (typeof v === "string") return { stringValue: v };
+  if (typeof v === "boolean") return { booleanValue: v };
+  if (typeof v === "number") return Number.isInteger(v) ? { integerValue: String(v) } : { doubleValue: v };
+  if (Array.isArray(v)) return { arrayValue: { values: v.map(fsValue) } };
+  return { mapValue: { fields: Object.fromEntries(Object.entries(v).map(([k, val]) => [k, fsValue(val)])) } };
+}
+
+async function readItems() {
+  const res = await fetchRetry(`${FS}/shoppingItems?key=${FB_KEY}&pageSize=300`);
+  const data = await res.json();
+  return (data.documents || [])
+    .map((d) => ({
+      id: d.name.split("/").pop(),
+      name: d.fields?.name?.stringValue || "",
+      quantity: Number(d.fields?.quantity?.integerValue ?? d.fields?.quantity?.doubleValue ?? 1),
+    }))
+    .filter((i) => i.name);
+}
+
+async function writePriceCache(itemId, obj) {
+  const body = JSON.stringify({ fields: fsValue(obj).mapValue.fields });
+  const res = await fetchRetry(`${FS}/priceCache/${itemId}?key=${FB_KEY}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body,
+  });
+  if (!res.ok) throw new Error(`priceCache write ${res.status}: ${(await res.text()).slice(0, 200)}`);
+}
+
+// Heuristic match: prefer more query-tokens matched, then shorter name, then cheaper.
+function bestMatch(items, query) {
+  const tokens = query.toLowerCase().split(/\s+/).filter((t) => t.length >= 2);
+  if (!tokens.length) tokens.push(query.toLowerCase());
+  let best = null, bestScore = -Infinity;
+  for (const it of items) {
+    const name = it.name.toLowerCase();
+    const matched = tokens.filter((t) => name.includes(t)).length;
+    if (matched === 0) continue;
+    const score = matched * 100000 - it.name.length * 100 - it.price;
+    if (score > bestScore) { bestScore = score; best = it; }
+  }
+  return best;
+}
+
+const CHAINS = [
   ["שופרסל", shufersal],
   ["רמי לוי", () => cerberus("RamiLevi")],
   ["יוחננוף", () => cerberus("yohananof")],
-  ["קרפור", carrefour],
 ];
 
-const result = { ranAt: new Date().toISOString(), chains: {} };
-for (const [label, fn] of chains) {
+const result = { ranAt: new Date().toISOString(), chains: {}, items: [] };
+const catalogs = {};
+for (const [label, fn] of CHAINS) {
   console.log(`\n========== ${label} ==========`);
   try {
-    const { file, items, head } = await fn();
-    const samples = {};
-    for (const term of TERMS) {
-      samples[term] = items
-        .filter((i) => i.name.includes(term))
-        .slice(0, 3)
-        .map((h) => ({ price: h.price, name: h.name, unit: h.unit }));
-    }
-    result.chains[label] = { ok: true, file, count: items.length, samples, head: items.length === 0 ? head : undefined };
+    const { items } = await fn();
+    catalogs[label] = items;
+    result.chains[label] = { ok: true, count: items.length };
     console.log(`OK: ${items.length} items`);
   } catch (e) {
-    const cause = e.cause ? (e.cause.code || e.cause.message) : "";
-    result.chains[label] = { ok: false, error: e.message, cause };
-    console.log(`FAILED: ${e.message} | cause: ${cause}`);
+    catalogs[label] = [];
+    result.chains[label] = { ok: false, error: e.message, cause: e.cause?.code || "" };
+    console.log(`FAILED: ${e.message}`);
   }
 }
+
+const items = await readItems();
+console.log(`\nread ${items.length} shopping items from Firestore`);
+let written = 0;
+for (const item of items) {
+  const prices = [];
+  for (const [label] of CHAINS) {
+    const m = bestMatch(catalogs[label], item.name);
+    if (m) prices.push({ store: label, matchedName: m.name, price: m.price, unit: m.unit });
+  }
+  try {
+    await writePriceCache(item.id, { itemName: item.name, updated: result.ranAt, prices });
+    written++;
+  } catch (e) {
+    console.log(`  write failed for ${item.name}: ${e.message}`);
+  }
+  result.items.push({ name: item.name, matches: prices.map((p) => `${p.store} ₪${p.price} (${p.matchedName})`) });
+}
+console.log(`wrote ${written}/${items.length} priceCache docs`);
 writeFileSync("result.json", JSON.stringify(result, null, 2));
-console.log("\nwrote result.json");
