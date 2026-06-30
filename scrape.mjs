@@ -292,7 +292,7 @@ if (process.env.DEBUG_TERM === "__STORES__") {
       const sf = files.find((n) => /storesfull/i.test(n)) || files.find((n) => /stores/i.test(n));
       const xml = decodeXml(await get(sf));
       const stores = parseStores(xml);
-      out[label] = { file: sf, total: stores.length, matches: stores.filter(hit), head: stores.length ? undefined : xml.slice(0, 500) };
+      out[label] = { file: sf, total: stores.length, all: stores.map((s) => `${s.id} | ${s.name} | ${s.city} | ${s.address}`), head: stores.length ? undefined : xml.slice(0, 500) };
     } catch (e) { out[label] = { error: e.message }; }
   }
   try {
