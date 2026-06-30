@@ -1,5 +1,5 @@
 {
-  "ranAt": "2026-06-30T11:39:54.361Z",
+  "ranAt": "2026-06-30T11:46:59.766Z",
   "chains": {
     "שופרסל": {
       "ok": true,
@@ -61,13 +61,66 @@
     },
     "רמי לוי": {
       "ok": false,
-      "error": "fetch failed",
-      "cause": "UNABLE_TO_VERIFY_LEAF_SIGNATURE"
+      "error": "incorrect header check",
+      "cause": ""
     },
     "יוחננוף": {
-      "ok": false,
-      "error": "fetch failed",
-      "cause": "UNABLE_TO_VERIFY_LEAF_SIGNATURE"
+      "ok": true,
+      "file": "PriceFull7290803800003-7999-202412271528.gz",
+      "count": 7527,
+      "samples": {
+        "בצל": [
+          {
+            "price": 4.9,
+            "name": "בצל אדום",
+            "unit": "קילוגרמים"
+          },
+          {
+            "price": 4.9,
+            "name": "בצל יבש",
+            "unit": "קילוגרמים"
+          },
+          {
+            "price": 9.9,
+            "name": "דורות בצל חצי מטוגן",
+            "unit": "גרמים"
+          }
+        ],
+        "חלב": [
+          {
+            "price": 13.9,
+            "name": "חלבה תלתלים בטעם וני",
+            "unit": "גרמים"
+          },
+          {
+            "price": 17.9,
+            "name": "טבלאות שוקולד חלב טו",
+            "unit": "גרמים"
+          },
+          {
+            "price": 14.9,
+            "name": "חלבה פיסטוק 500 גרם",
+            "unit": "גרמים"
+          }
+        ],
+        "עגבני": [
+          {
+            "price": 4.9,
+            "name": "עגבניה",
+            "unit": "קילוגרמים"
+          },
+          {
+            "price": 18.9,
+            "name": "עגבניות שרי שקיל",
+            "unit": "קילוגרמים"
+          },
+          {
+            "price": 6.5,
+            "name": "עגבניות מקולפות 400",
+            "unit": "גרמים"
+          }
+        ]
+      }
     },
     "קרפור": {
       "ok": false,
