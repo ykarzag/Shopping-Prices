@@ -1,5 +1,5 @@
 {
-  "ranAt": "2026-06-30T11:58:32.501Z",
+  "ranAt": "2026-06-30T12:24:08.374Z",
   "chains": {
     "שופרסל": {
       "ok": true,
@@ -67,7 +67,8 @@
         "בצל": [],
         "חלב": [],
         "עגבני": []
-      }
+      },
+      "head": "<Root>\r\n  <ChainId>7290058140886</ChainId>\r\n  <SubChainId>1</SubChainId>\r\n  <StoreId>39</StoreId>\r\n  <BikoretNo>3</BikoretNo>\r\n  <Items>\r\n    <Item>\r\n      <PriceUpdateDate>2025-01-19 16:03:55</PriceUpdateDate>\r\n      <ItemCode>6</ItemCode>\r\n      <ItemType>1</ItemType>\r\n      <ItemNm>פריט חדש  בדיקה יוני</ItemNm>\r\n      <ManufacturerName>לא ידוע</ManufacturerName>\r\n      <ManufactureCountry>לא ידוע</ManufactureCountry>\r\n      <ManufacturerItemDescription>פריט חדש  בדיקה יוני</ManufacturerItemDescription>\r\n      <UnitQty>יח'</UnitQty>\r\n      <Quantity>1</Quantity>\r\n      <UnitOfMeasure>1 יח'  </UnitOfMeasure>\r\n      <bIsWeighted>0</bIsWeighted>\r\n      <QtyInPackage>6.0000</QtyInPackage>\r\n   "
     },
     "יוחננוף": {
       "ok": true,
