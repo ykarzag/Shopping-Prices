@@ -108,7 +108,7 @@ async function cerberus(username) {
     const head = buf.slice(0, 60).toString("latin1").replace(/[\r\n]+/g, " ");
     throw new Error(`gunzip failed for ${pick} (status ${dl.status}, ${buf.length} bytes, head="${head}")`);
   }
-  return { file: pick, items: parseItems(xml) };
+  return { file: pick, items: parseItems(xml), head: xml.slice(0, 700) };
 }
 
 // ---- Shufersal direct ----
@@ -118,7 +118,7 @@ async function shufersal() {
   if (!m) throw new Error("no PriceFull link");
   const url = m[1].replace(/&amp;/g, "&");
   const xml = decompress(Buffer.from(await (await fetch(url)).arrayBuffer())).toString("utf8");
-  return { file: url.split("?")[0].split("/").pop(), items: parseItems(xml) };
+  return { file: url.split("?")[0].split("/").pop(), items: parseItems(xml), head: xml.slice(0, 700) };
 }
 
 // ---- Carrefour direct (U-CODE.NET portal — structure discovery) ----
@@ -147,7 +147,7 @@ const result = { ranAt: new Date().toISOString(), chains: {} };
 for (const [label, fn] of chains) {
   console.log(`\n========== ${label} ==========`);
   try {
-    const { file, items } = await fn();
+    const { file, items, head } = await fn();
     const samples = {};
     for (const term of TERMS) {
       samples[term] = items
@@ -155,7 +155,7 @@ for (const [label, fn] of chains) {
         .slice(0, 3)
         .map((h) => ({ price: h.price, name: h.name, unit: h.unit }));
     }
-    result.chains[label] = { ok: true, file, count: items.length, samples };
+    result.chains[label] = { ok: true, file, count: items.length, samples, head: items.length === 0 ? head : undefined };
     console.log(`OK: ${items.length} items`);
   } catch (e) {
     const cause = e.cause ? (e.cause.code || e.cause.message) : "";
