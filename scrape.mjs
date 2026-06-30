@@ -1,7 +1,33 @@
 // Validation scraper — confirms we can download + parse price files for each
 // chain in the cloud (GitHub Actions), where the corporate proxy is not a factor.
-import { gunzipSync } from "node:zlib";
+import { gunzipSync, inflateRawSync } from "node:zlib";
 import { writeFileSync } from "node:fs";
+
+// Decompress a price file: handles both gzip (Shufersal/Yohananof) and zip (Rami Levy).
+function decompress(buf) {
+  if (buf[0] === 0x1f && buf[1] === 0x8b) return gunzipSync(buf); // gzip
+  if (buf[0] === 0x50 && buf[1] === 0x4b) {
+    // ZIP — read the central directory for reliable sizes/offset
+    let eocd = -1;
+    for (let i = buf.length - 22; i >= 0; i--) {
+      if (buf.readUInt32LE(i) === 0x06054b50) { eocd = i; break; }
+    }
+    if (eocd < 0) throw new Error("zip: no EOCD");
+    const cd = buf.readUInt32LE(eocd + 16);
+    if (buf.readUInt32LE(cd) !== 0x02014b50) throw new Error("zip: bad central dir");
+    const method = buf.readUInt16LE(cd + 10);
+    const compSize = buf.readUInt32LE(cd + 20);
+    const localOff = buf.readUInt32LE(cd + 42);
+    const lNameLen = buf.readUInt16LE(localOff + 26);
+    const lExtraLen = buf.readUInt16LE(localOff + 28);
+    const start = localOff + 30 + lNameLen + lExtraLen;
+    const comp = buf.subarray(start, start + compSize);
+    if (method === 0) return comp;
+    if (method === 8) return inflateRawSync(comp);
+    throw new Error("zip: unsupported method " + method);
+  }
+  throw new Error("unknown archive head " + buf.subarray(0, 4).toString("hex"));
+}
 
 const UA = "Mozilla/5.0";
 
@@ -77,7 +103,7 @@ async function cerberus(username) {
   const buf = Buffer.from(await dl.arrayBuffer());
   let xml;
   try {
-    xml = gunzipSync(buf).toString("utf8");
+    xml = decompress(buf).toString("utf8");
   } catch (e) {
     const head = buf.slice(0, 60).toString("latin1").replace(/[\r\n]+/g, " ");
     throw new Error(`gunzip failed for ${pick} (status ${dl.status}, ${buf.length} bytes, head="${head}")`);
@@ -91,7 +117,7 @@ async function shufersal() {
   const m = /href="([^"]+PriceFull[^"]+\.gz[^"]*)"/.exec(list);
   if (!m) throw new Error("no PriceFull link");
   const url = m[1].replace(/&amp;/g, "&");
-  const xml = gunzipSync(Buffer.from(await (await fetch(url)).arrayBuffer())).toString("utf8");
+  const xml = decompress(Buffer.from(await (await fetch(url)).arrayBuffer())).toString("utf8");
   return { file: url.split("?")[0].split("/").pop(), items: parseItems(xml) };
 }
 
