@@ -138,6 +138,7 @@ async function carrefour() {
 const FB_PROJECT = "shoppingcart300626";
 const FB_KEY = "AIzaSyAB_l1XWmRRSsd9K_Fw_pXc8ARE4EV5kFE"; // public web config key
 const FS = `https://firestore.googleapis.com/v1/projects/${FB_PROJECT}/databases/(default)/documents`;
+const GROQ_KEY = process.env.GROQ_API_KEY;
 
 // Encode a JS value into Firestore REST typed format.
 function fsValue(v) {
@@ -186,6 +187,45 @@ function bestMatch(items, query) {
   return best;
 }
 
+// Prefilter: top-N catalog products that share tokens with the query.
+function candidates(items, query, n = 25) {
+  const tokens = query.toLowerCase().split(/\s+/).filter((t) => t.length >= 2);
+  if (!tokens.length) tokens.push(query.toLowerCase());
+  const scored = [];
+  for (const it of items) {
+    const name = it.name.toLowerCase();
+    const matched = tokens.filter((t) => name.includes(t)).length;
+    if (matched === 0) continue;
+    scored.push({ it, s: matched * 1000 - it.name.length });
+  }
+  scored.sort((a, b) => b.s - a.s);
+  return scored.slice(0, n).map((x) => x.it);
+}
+
+// Ask Groq to choose the best-matching candidate index per chain (real prices kept).
+async function groqPick(itemName, candByChain) {
+  const lines = Object.entries(candByChain)
+    .map(([chain, cands]) => `חנות "${chain}":\n` + (cands.length ? cands.map((c, i) => `  ${i}. ${c.name}`).join("\n") : "  (אין מועמדים)"))
+    .join("\n\n");
+  const prompt = `המשתמש רוצה לקנות מוצר בשם: "${itemName}".
+לכל חנות, בחר את המספר (index) של המוצר ברשימה שהכי מתאים למה שהמשתמש התכוון — אותו סוג מוצר, הוריאנט/אריזה הסביר ביותר. אל תבחר מוצר מסוג אחר רק בגלל מילה משותפת (למשל "קולה" אינו "רוקולה"). אם אף מוצר לא באמת מתאים, החזר -1.
+החזר JSON בלבד במבנה: { "שופרסל": number, "רמי לוי": number, "יוחננוף": number }
+
+${lines}`;
+  const res = await fetch("https://api.groq.com/openai/v1/chat/completions", {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Authorization: `Bearer ${GROQ_KEY}` },
+    body: JSON.stringify({
+      model: "llama-3.3-70b-versatile",
+      messages: [{ role: "user", content: prompt }],
+      response_format: { type: "json_object" },
+      temperature: 0,
+    }),
+  });
+  if (!res.ok) throw new Error(`groq ${res.status}: ${(await res.text()).slice(0, 150)}`);
+  return JSON.parse((await res.json()).choices[0].message.content);
+}
+
 const CHAINS = [
   ["שופרסל", shufersal],
   ["רמי לוי", () => cerberus("RamiLevi")],
@@ -212,11 +252,28 @@ const items = await readItems();
 console.log(`\nread ${items.length} shopping items from Firestore`);
 let written = 0;
 for (const item of items) {
+  const candByChain = {};
+  for (const [label] of CHAINS) candByChain[label] = candidates(catalogs[label], item.name);
+
+  let picks = null;
+  try {
+    picks = await groqPick(item.name, candByChain);
+  } catch (e) {
+    console.log(`  groq failed for ${item.name}: ${e.message} — using heuristic`);
+  }
+
   const prices = [];
   for (const [label] of CHAINS) {
-    const m = bestMatch(catalogs[label], item.name);
-    if (m) prices.push({ store: label, matchedName: m.name, price: m.price, unit: m.unit });
+    let cand = null;
+    if (picks) {
+      const idx = Number(picks[label]);
+      if (Number.isInteger(idx) && idx >= 0 && candByChain[label][idx]) cand = candByChain[label][idx];
+    } else {
+      cand = bestMatch(catalogs[label], item.name); // fallback when Groq unavailable
+    }
+    if (cand) prices.push({ store: label, matchedName: cand.name, price: cand.price, unit: cand.unit });
   }
+
   try {
     await writePriceCache(item.id, { itemName: item.name, updated: result.ranAt, prices });
     written++;

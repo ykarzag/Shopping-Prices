@@ -21,6 +21,7 @@ jobs:
           # publishedprices.co.il serves an incomplete cert chain that Node rejects.
           # This scraper only downloads PUBLIC price data, so relaxing TLS is acceptable.
           NODE_TLS_REJECT_UNAUTHORIZED: "0"
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
         run: node scrape.mjs
       - name: Commit result.json
         run: |
