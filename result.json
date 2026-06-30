@@ -1,5 +1,5 @@
 {
-  "ranAt": "2026-06-30T11:35:36.427Z",
+  "ranAt": "2026-06-30T11:36:38.373Z",
   "chains": {
     "שופרסל": {
       "ok": true,
@@ -61,15 +61,18 @@
     },
     "רמי לוי": {
       "ok": false,
-      "error": "fetch failed"
+      "error": "fetch failed",
+      "cause": "UNABLE_TO_VERIFY_LEAF_SIGNATURE"
     },
     "יוחננוף": {
       "ok": false,
-      "error": "fetch failed"
+      "error": "fetch failed",
+      "cause": "UNABLE_TO_VERIFY_LEAF_SIGNATURE"
     },
     "קרפור": {
       "ok": false,
-      "error": "fetch failed"
+      "error": "fetch failed",
+      "cause": "UND_ERR_CONNECT_TIMEOUT"
     }
   }
 }
