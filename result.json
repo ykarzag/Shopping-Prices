@@ -1,5 +1,5 @@
 {
-  "ranAt": "2026-06-30T12:24:08.374Z",
+  "ranAt": "2026-06-30T12:26:26.416Z",
   "chains": {
     "שופרסל": {
       "ok": true,
@@ -62,13 +62,60 @@
     "רמי לוי": {
       "ok": true,
       "file": "pricefull7290058140886-039-202606300511.gz",
-      "count": 0,
+      "count": 15578,
       "samples": {
-        "בצל": [],
-        "חלב": [],
-        "עגבני": []
-      },
-      "head": "<Root>\r\n  <ChainId>7290058140886</ChainId>\r\n  <SubChainId>1</SubChainId>\r\n  <StoreId>39</StoreId>\r\n  <BikoretNo>3</BikoretNo>\r\n  <Items>\r\n    <Item>\r\n      <PriceUpdateDate>2025-01-19 16:03:55</PriceUpdateDate>\r\n      <ItemCode>6</ItemCode>\r\n      <ItemType>1</ItemType>\r\n      <ItemNm>פריט חדש  בדיקה יוני</ItemNm>\r\n      <ManufacturerName>לא ידוע</ManufacturerName>\r\n      <ManufactureCountry>לא ידוע</ManufactureCountry>\r\n      <ManufacturerItemDescription>פריט חדש  בדיקה יוני</ManufacturerItemDescription>\r\n      <UnitQty>יח'</UnitQty>\r\n      <Quantity>1</Quantity>\r\n      <UnitOfMeasure>1 יח'  </UnitOfMeasure>\r\n      <bIsWeighted>0</bIsWeighted>\r\n      <QtyInPackage>6.0000</QtyInPackage>\r\n   "
+        "בצל": [
+          {
+            "price": 4.9,
+            "name": "בצל יבש",
+            "unit": "ק\"ג"
+          },
+          {
+            "price": 5.9,
+            "name": "בצל אדום",
+            "unit": "ק\"ג"
+          },
+          {
+            "price": 58,
+            "name": "רבעי פרגיות ממולאות מלוח בצל פטריות מעדני הטלה",
+            "unit": "ק\"ג"
+          }
+        ],
+        "חלב": [
+          {
+            "price": 73.3,
+            "name": "סחלב פלנפוסיס",
+            "unit": "יח'"
+          },
+          {
+            "price": 7.8,
+            "name": "דונאטס חלבי",
+            "unit": "יח'"
+          },
+          {
+            "price": 14.5,
+            "name": "מעדני חלב טעם שוקולד 6*60גר",
+            "unit": "גרם"
+          }
+        ],
+        "עגבני": [
+          {
+            "price": 6.9,
+            "name": "עגבניה",
+            "unit": "ק\"ג"
+          },
+          {
+            "price": 25.3,
+            "name": "עגבניות שרי פרימיום",
+            "unit": "ק\"ג"
+          },
+          {
+            "price": 18.9,
+            "name": "עגבניות שרי צהוב/כתום",
+            "unit": "ק\"ג"
+          }
+        ]
+      }
     },
     "יוחננוף": {
       "ok": true,
