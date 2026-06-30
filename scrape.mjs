@@ -55,7 +55,7 @@ function parseItems(xml) {
   const items = [];
   for (const im of xml.matchAll(/<Item>([\s\S]*?)<\/Item>/g)) {
     const b = im[1];
-    const name = get(b, "ItemName");
+    const name = get(b, "ItemName") || get(b, "ItemNm");
     const price = parseFloat(get(b, "ItemPrice"));
     if (!name || !isFinite(price)) continue;
     items.push({ name, price, unit: get(b, "UnitQty") || get(b, "UnitOfMeasure") || "" });
