@@ -2,8 +2,8 @@ name: scrape-prices
 
 on:
   workflow_dispatch: {}   # manual run button
-  # schedule:
-  #   - cron: "0 4 * * *"  # daily 04:00 UTC (enable later)
+  schedule:
+    - cron: "0 4 * * *"   # daily ~07:00 Israel time
 
 permissions:
   contents: write
