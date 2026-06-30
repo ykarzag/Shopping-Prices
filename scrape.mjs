@@ -26,7 +26,14 @@ function decompress(buf) {
     if (method === 8) return inflateRawSync(comp);
     throw new Error("zip: unsupported method " + method);
   }
-  throw new Error("unknown archive head " + buf.subarray(0, 4).toString("hex"));
+  return buf; // not compressed — plain XML (possibly UTF-16)
+}
+
+// Decode an XML buffer honoring a UTF-16/UTF-8 BOM.
+function decodeXml(buf) {
+  if (buf[0] === 0xff && buf[1] === 0xfe) return buf.toString("utf16le");
+  if (buf[0] === 0xfe && buf[1] === 0xff) return Buffer.from(buf).swap16().toString("utf16le");
+  return buf.toString("utf8");
 }
 
 const UA = "Mozilla/5.0";
@@ -141,17 +148,17 @@ async function cerberus(username, storeId) {
   full.sort();
   const pick = full[full.length - 1];
   if (!pick) throw new Error(`no PriceFull (sample: ${files.slice(0, 3).join(", ")})`);
-  const xml = (await get(pick)).toString("utf8");
+  const xml = decodeXml(await get(pick));
   return { file: pick, items: parseItems(xml), head: xml.slice(0, 700) };
 }
 
 // ---- Shufersal direct ----
-async function shufersal() {
-  const list = await (await fetch("https://prices.shufersal.co.il/FileObject/UpdateCategory?catID=2&storeId=0&page=1")).text();
+async function shufersal(storeId = 0) {
+  const list = await (await fetch(`https://prices.shufersal.co.il/FileObject/UpdateCategory?catID=2&storeId=${storeId}&page=1`)).text();
   const m = /href="([^"]+PriceFull[^"]+\.gz[^"]*)"/.exec(list);
   if (!m) throw new Error("no PriceFull link");
   const url = m[1].replace(/&amp;/g, "&");
-  const xml = decompress(Buffer.from(await (await fetch(url)).arrayBuffer())).toString("utf8");
+  const xml = decodeXml(decompress(Buffer.from(await (await fetch(url)).arrayBuffer())));
   return { file: url.split("?")[0].split("/").pop(), items: parseItems(xml), head: xml.slice(0, 700) };
 }
 
@@ -283,7 +290,7 @@ if (process.env.DEBUG_TERM === "__STORES__") {
     try {
       const { files, get } = await cerberusSession(user);
       const sf = files.find((n) => /storesfull/i.test(n)) || files.find((n) => /stores/i.test(n));
-      const xml = (await get(sf)).toString("utf8");
+      const xml = decodeXml(await get(sf));
       const stores = parseStores(xml);
       out[label] = { file: sf, total: stores.length, matches: stores.filter(hit), head: stores.length ? undefined : xml.slice(0, 500) };
     } catch (e) { out[label] = { error: e.message }; }
@@ -291,7 +298,7 @@ if (process.env.DEBUG_TERM === "__STORES__") {
   try {
     const list = await (await fetch("https://prices.shufersal.co.il/FileObject/UpdateCategory?catID=5&storeId=0&page=1")).text();
     const m = /href="([^"]+\.gz[^"]*)"/.exec(list);
-    const xml = decompress(Buffer.from(await (await fetch(m[1].replace(/&amp;/g, "&"))).arrayBuffer())).toString("utf8");
+    const xml = decodeXml(decompress(Buffer.from(await (await fetch(m[1].replace(/&amp;/g, "&"))).arrayBuffer())));
     const stores = parseStores(xml);
     out["שופרסל"] = { total: stores.length, matches: stores.filter(hit), head: stores.length ? undefined : xml.slice(0, 500) };
   } catch (e) { out["שופרסל"] = { error: e.message }; }
