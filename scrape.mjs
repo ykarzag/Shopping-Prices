@@ -63,8 +63,34 @@ function parseItems(xml) {
   return items;
 }
 
+// Parse a Stores XML file into [{ id, name, city, address }].
+function parseStores(xml) {
+  const stores = [];
+  const get = (b, tags) => {
+    for (const t of tags) {
+      const m = new RegExp(`<${t}>([\\s\\S]*?)</${t}>`, "i").exec(b);
+      if (m) return m[1].trim();
+    }
+    return "";
+  };
+  const re = /<(Store|STORE|Branch|BRANCH)>([\s\S]*?)<\/\1>/g;
+  let m;
+  while ((m = re.exec(xml)) !== null) {
+    const b = m[2];
+    const id = get(b, ["StoreId", "StoreID", "StoreNo", "BranchId", "StoreNumber"]);
+    if (!id) continue;
+    stores.push({
+      id,
+      name: get(b, ["StoreName", "BranchName"]),
+      city: get(b, ["City"]),
+      address: get(b, ["Address"]),
+    });
+  }
+  return stores;
+}
+
 // ---- Cerberus portal (Rami Levy, Yohananof, ...) ----
-async function cerberus(username) {
+async function cerberusSession(username) {
   const BASE = "https://url.publishedprices.co.il";
   const jar = {};
   const store = (res) => {
@@ -96,18 +122,26 @@ async function cerberus(username) {
     body: `csrftoken=${encodeURIComponent(t1)}&iDisplayStart=0&iDisplayLength=5000&cd=%2F`,
   });
   const files = [...(await r.text()).matchAll(/"fname":"([^"]+)"/g)].map((x) => x[1]);
-  const full = files.filter((n) => /pricefull/i.test(n)).sort();
+  const get = async (fname) =>
+    decompress(Buffer.from(await (await fetch(`${BASE}/file/d/${fname}`, { headers: { "User-Agent": UA, Cookie: cookie() } })).arrayBuffer()));
+  return { files, get };
+}
+
+async function cerberus(username, storeId) {
+  const { files, get } = await cerberusSession(username);
+  let full = files.filter((n) => /pricefull/i.test(n));
+  if (storeId) {
+    const padded = String(storeId).padStart(3, "0");
+    const forStore = full.filter((n) => {
+      const segs = n.split(/[-.]/);
+      return segs.includes(padded) || segs.includes(String(storeId));
+    });
+    if (forStore.length) full = forStore;
+  }
+  full.sort();
   const pick = full[full.length - 1];
   if (!pick) throw new Error(`no PriceFull (sample: ${files.slice(0, 3).join(", ")})`);
-  const dl = await fetch(`${BASE}/file/d/${pick}`, { headers: { "User-Agent": UA, Cookie: cookie() } });
-  const buf = Buffer.from(await dl.arrayBuffer());
-  let xml;
-  try {
-    xml = decompress(buf).toString("utf8");
-  } catch (e) {
-    const head = buf.slice(0, 60).toString("latin1").replace(/[\r\n]+/g, " ");
-    throw new Error(`gunzip failed for ${pick} (status ${dl.status}, ${buf.length} bytes, head="${head}")`);
-  }
+  const xml = (await get(pick)).toString("utf8");
   return { file: pick, items: parseItems(xml), head: xml.slice(0, 700) };
 }
 
@@ -239,6 +273,32 @@ const CHAINS = [
   ["רמי לוי", () => cerberus("RamiLevi")],
   ["יוחננוף", () => cerberus("yohananof")],
 ];
+
+// Store discovery mode: find the user's branches and their StoreIds.
+if (process.env.DEBUG_TERM === "__STORES__") {
+  const kw = ["אלונים", "חיפה", "צ'ק", "צ׳ק", "ביג", "טבעון", "קרית אתא", "קריית אתא", "נשר", "רכסים"];
+  const hit = (s) => kw.some((k) => `${s.city} ${s.name} ${s.address}`.includes(k));
+  const out = {};
+  for (const [label, user] of [["רמי לוי", "RamiLevi"], ["יוחננוף", "yohananof"]]) {
+    try {
+      const { files, get } = await cerberusSession(user);
+      const sf = files.find((n) => /storesfull/i.test(n)) || files.find((n) => /stores/i.test(n));
+      const xml = (await get(sf)).toString("utf8");
+      const stores = parseStores(xml);
+      out[label] = { file: sf, total: stores.length, matches: stores.filter(hit), head: stores.length ? undefined : xml.slice(0, 500) };
+    } catch (e) { out[label] = { error: e.message }; }
+  }
+  try {
+    const list = await (await fetch("https://prices.shufersal.co.il/FileObject/UpdateCategory?catID=5&storeId=0&page=1")).text();
+    const m = /href="([^"]+\.gz[^"]*)"/.exec(list);
+    const xml = decompress(Buffer.from(await (await fetch(m[1].replace(/&amp;/g, "&"))).arrayBuffer())).toString("utf8");
+    const stores = parseStores(xml);
+    out["שופרסל"] = { total: stores.length, matches: stores.filter(hit), head: stores.length ? undefined : xml.slice(0, 500) };
+  } catch (e) { out["שופרסל"] = { error: e.message }; }
+  writeFileSync("result.json", JSON.stringify(out, null, 2));
+  console.log("stores debug written");
+  process.exit(0);
+}
 
 const result = { ranAt: new Date().toISOString(), chains: {}, items: [] };
 const catalogs = {};
