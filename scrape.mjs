@@ -115,8 +115,9 @@ for (const [label, fn] of chains) {
     result.chains[label] = { ok: true, file, count: items.length, samples };
     console.log(`OK: ${items.length} items`);
   } catch (e) {
-    result.chains[label] = { ok: false, error: e.message };
-    console.log(`FAILED: ${e.message}`);
+    const cause = e.cause ? (e.cause.code || e.cause.message) : "";
+    result.chains[label] = { ok: false, error: e.message, cause };
+    console.log(`FAILED: ${e.message} | cause: ${cause}`);
   }
 }
 writeFileSync("result.json", JSON.stringify(result, null, 2));
