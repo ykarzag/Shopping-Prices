@@ -1,0 +1,10 @@
+{
+  "name": "shopping-prices",
+  "private": true,
+  "type": "module",
+  "version": "0.1.0",
+  "description": "Daily scraper for Israeli supermarket price feeds (Shufersal, Rami Levy, Yohananof, Carrefour) that precomputes real prices for the shopping-list app.",
+  "scripts": {
+    "scrape": "node scrape.mjs"
+  }
+}
