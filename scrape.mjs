@@ -74,7 +74,14 @@ async function cerberus(username) {
   const pick = full[full.length - 1];
   if (!pick) throw new Error(`no PriceFull (sample: ${files.slice(0, 3).join(", ")})`);
   const dl = await fetch(`${BASE}/file/d/${pick}`, { headers: { "User-Agent": UA, Cookie: cookie() } });
-  const xml = gunzipSync(Buffer.from(await dl.arrayBuffer())).toString("utf8");
+  const buf = Buffer.from(await dl.arrayBuffer());
+  let xml;
+  try {
+    xml = gunzipSync(buf).toString("utf8");
+  } catch (e) {
+    const head = buf.slice(0, 60).toString("latin1").replace(/[\r\n]+/g, " ");
+    throw new Error(`gunzip failed for ${pick} (status ${dl.status}, ${buf.length} bytes, head="${head}")`);
+  }
   return { file: pick, items: parseItems(xml) };
 }
 
