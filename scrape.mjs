@@ -188,7 +188,7 @@ function bestMatch(items, query) {
 }
 
 // Prefilter: top-N catalog products that share tokens with the query.
-function candidates(items, query, n = 25) {
+function candidates(items, query, n = 40) {
   const tokens = query.toLowerCase().split(/\s+/).filter((t) => t.length >= 2);
   if (!tokens.length) tokens.push(query.toLowerCase());
   const scored = [];
@@ -208,7 +208,9 @@ async function groqPick(itemName, candByChain) {
     .map(([chain, cands]) => `חנות "${chain}":\n` + (cands.length ? cands.map((c, i) => `  ${i}. ${c.name}`).join("\n") : "  (אין מועמדים)"))
     .join("\n\n");
   const prompt = `המשתמש רוצה לקנות מוצר בשם: "${itemName}".
-לכל חנות, בחר את המספר (index) של המוצר ברשימה שהכי מתאים למה שהמשתמש התכוון — אותו סוג מוצר, הוריאנט/אריזה הסביר ביותר. אל תבחר מוצר מסוג אחר רק בגלל מילה משותפת (למשל "קולה" אינו "רוקולה"). אם אף מוצר לא באמת מתאים, החזר -1.
+לכל חנות, בחר את ה-index של המוצר ברשימה שהכי מתאים מבחינת *סוג המוצר* שהמשתמש מתכוון אליו — לא חייב אותן מילים בדיוק, אלא אותו מוצר במהות.
+דוגמאות: "מוצרלה פרסקה" = מוצרלה טרייה / כדור מוצרלה טרי; "קולה" = קוקה קולה / משקה קולה (לא "רוקולה"); "בצל" = בצל יבש טרי (לא חטיף בטעם בצל); "שמן רגיל" = שמן קנולה/חמניות לבישול.
+העדף את הווריאנט הבסיסי והסטנדרטי של המוצר (לא תחליף, לא טבעוני, אלא אם המשתמש ביקש). החזר -1 רק אם באמת אין ברשימה מוצר מאותו סוג.
 החזר JSON בלבד במבנה: { "שופרסל": number, "רמי לוי": number, "יוחננוף": number }
 
 ${lines}`;
