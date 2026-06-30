@@ -5,6 +5,21 @@ import { writeFileSync } from "node:fs";
 
 const UA = "Mozilla/5.0";
 
+// fetch with retries + per-attempt timeout (cloud networks can be flaky to these hosts)
+async function fetchRetry(url, opts = {}, tries = 3) {
+  let last;
+  for (let i = 0; i < tries; i++) {
+    try {
+      const ctrl = new AbortController();
+      const to = setTimeout(() => ctrl.abort(), 25000);
+      const res = await fetch(url, { ...opts, signal: ctrl.signal });
+      clearTimeout(to);
+      return res;
+    } catch (e) { last = e; }
+  }
+  throw last;
+}
+
 // ---- generic "מחירים שקופים" XML item parser ----
 function parseItems(xml) {
   const get = (b, t) => {
@@ -73,22 +88,17 @@ async function shufersal() {
   return { file: url.split("?")[0].split("/").pop(), items: parseItems(xml) };
 }
 
-// ---- Carrefour direct (structure discovery) ----
+// ---- Carrefour direct (U-CODE.NET portal — structure discovery) ----
 async function carrefour() {
-  const root = await fetch("https://prices.carrefour.co.il/");
-  const html = await root.text();
-  const gz = [...html.matchAll(/href="([^"]+\.gz[^"]*)"/g)].map((x) => x[1]).slice(0, 3);
-  console.log("   [carrefour] root status", root.status, "bytes", html.length, "| .gz links:", gz.length);
-  if (gz.length) console.log("   sample:", gz[0].slice(0, 120));
-  // Try a Shufersal-style listing endpoint
-  for (const path of ["FileObject/UpdateCategory?catID=2&storeId=0&page=1", "file/json/dir"]) {
-    try {
-      const rr = await fetch(`https://prices.carrefour.co.il/${path}`, { method: path.includes("json") ? "POST" : "GET" });
-      const tt = await rr.text();
-      console.log(`   [carrefour] /${path.split("?")[0]} -> ${rr.status}, bytes ${tt.length}, PriceFull? ${/PriceFull/i.test(tt)}`);
-    } catch (e) { console.log(`   [carrefour] /${path} failed: ${e.message}`); }
-  }
-  throw new Error("carrefour: discovery only (see logs above)");
+  const res = await fetchRetry("https://prices.carrefour.co.il/");
+  const html = await res.text();
+  const hrefs = [...html.matchAll(/href="([^"]+)"/g)].map((m) => m[1]);
+  const actions = [...html.matchAll(/action="([^"]+)"/g)].map((m) => m[1]);
+  const gz = hrefs.filter((h) => /\.gz/i.test(h));
+  const interesting = [...new Set(hrefs.filter((h) => /file|download|price|\?|Download/i.test(h)))].slice(0, 15);
+  throw new Error(
+    `DISCOVERY status=${res.status} bytes=${html.length} | gz=${JSON.stringify(gz.slice(0, 3))} | forms=${JSON.stringify(actions.slice(0, 5))} | links=${JSON.stringify(interesting)}`
+  );
 }
 
 // ---- run all, report ----

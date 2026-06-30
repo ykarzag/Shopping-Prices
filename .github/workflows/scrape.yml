@@ -17,6 +17,10 @@ jobs:
         with:
           node-version: "20"
       - name: Run scraper
+        env:
+          # publishedprices.co.il serves an incomplete cert chain that Node rejects.
+          # This scraper only downloads PUBLIC price data, so relaxing TLS is acceptable.
+          NODE_TLS_REJECT_UNAUTHORIZED: "0"
         run: node scrape.mjs
       - name: Commit result.json
         run: |
