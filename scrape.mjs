@@ -1,6 +1,7 @@
 // Validation scraper — confirms we can download + parse price files for each
 // chain in the cloud (GitHub Actions), where the corporate proxy is not a factor.
 import { gunzipSync } from "node:zlib";
+import { writeFileSync } from "node:fs";
 
 const UA = "Mozilla/5.0";
 
@@ -99,16 +100,24 @@ const chains = [
   ["קרפור", carrefour],
 ];
 
+const result = { ranAt: new Date().toISOString(), chains: {} };
 for (const [label, fn] of chains) {
   console.log(`\n========== ${label} ==========`);
   try {
     const { file, items } = await fn();
-    console.log(`file: ${file}\nparsed items: ${items.length}`);
+    const samples = {};
     for (const term of TERMS) {
-      const hits = items.filter((i) => i.name.includes(term)).slice(0, 3);
-      console.log(`  "${term}" (${hits.length}): ` + hits.map((h) => `₪${h.price} ${h.name}`).join(" | "));
+      samples[term] = items
+        .filter((i) => i.name.includes(term))
+        .slice(0, 3)
+        .map((h) => ({ price: h.price, name: h.name, unit: h.unit }));
     }
+    result.chains[label] = { ok: true, file, count: items.length, samples };
+    console.log(`OK: ${items.length} items`);
   } catch (e) {
+    result.chains[label] = { ok: false, error: e.message };
     console.log(`FAILED: ${e.message}`);
   }
 }
+writeFileSync("result.json", JSON.stringify(result, null, 2));
+console.log("\nwrote result.json");
