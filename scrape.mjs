@@ -194,9 +194,15 @@ function candidates(items, query, n = 40) {
   const scored = [];
   for (const it of items) {
     const name = it.name.toLowerCase();
-    const matched = tokens.filter((t) => name.includes(t)).length;
-    if (matched === 0) continue;
-    scored.push({ it, s: matched * 1000 - it.name.length });
+    const words = name.split(/[\s,.\-/()'"]+/).filter(Boolean);
+    let wordHits = 0, subHits = 0;
+    for (const t of tokens) {
+      if (words.some((w) => w === t || w.startsWith(t))) wordHits++;
+      else if (name.includes(t)) subHits++;
+    }
+    if (wordHits === 0 && subHits === 0) continue;
+    // whole-word matches dominate substring matches; shorter name as minor tiebreak
+    scored.push({ it, s: wordHits * 10000 + subHits * 100 - it.name.length });
   }
   scored.sort((a, b) => b.s - a.s);
   return scored.slice(0, n).map((x) => x.it);
