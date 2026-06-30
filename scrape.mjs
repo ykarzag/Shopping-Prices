@@ -248,6 +248,21 @@ for (const [label, fn] of CHAINS) {
   }
 }
 
+if (process.env.DEBUG_TERM) {
+  const term = process.env.DEBUG_TERM;
+  const toks = term.toLowerCase().split(/\s+/).filter((t) => t.length >= 2);
+  const dbg = {};
+  for (const [label] of CHAINS) {
+    dbg[label] = (catalogs[label] || [])
+      .filter((it) => toks.some((t) => it.name.toLowerCase().includes(t)))
+      .slice(0, 50)
+      .map((it) => `₪${it.price} ${it.name}`);
+  }
+  writeFileSync("result.json", JSON.stringify({ debugTerm: term, matches: dbg }, null, 2));
+  console.log("debug written for", term);
+  process.exit(0);
+}
+
 const items = await readItems();
 console.log(`\nread ${items.length} shopping items from Firestore`);
 let written = 0;

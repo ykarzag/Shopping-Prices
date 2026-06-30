@@ -1,7 +1,12 @@
 name: scrape-prices
 
 on:
-  workflow_dispatch: {}   # manual run button
+  workflow_dispatch:
+    inputs:
+      debug_term:
+        description: "If set, only dump catalog products matching this term (diagnosis)"
+        required: false
+        default: ""
   schedule:
     - cron: "0 4 * * *"   # daily ~07:00 Israel time
 
@@ -22,6 +27,7 @@ jobs:
           # This scraper only downloads PUBLIC price data, so relaxing TLS is acceptable.
           NODE_TLS_REJECT_UNAUTHORIZED: "0"
           GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+          DEBUG_TERM: ${{ github.event.inputs.debug_term }}
         run: node scrape.mjs
       - name: Commit result.json
         run: |
