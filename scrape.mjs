@@ -264,14 +264,16 @@ ${lines}`;
     method: "POST",
     headers: { "Content-Type": "application/json", Authorization: `Bearer ${GROQ_KEY}` },
     body: JSON.stringify({
-      model: process.env.GROQ_MODEL || "llama-3.3-70b-versatile",
+      model: process.env.GROQ_MODEL || "qwen/qwen3-32b",
       messages: [{ role: "user", content: prompt }],
       response_format: { type: "json_object" },
       temperature: 0,
     }),
   });
   if (!res.ok) throw new Error(`groq ${res.status}: ${(await res.text()).slice(0, 150)}`);
-  return JSON.parse((await res.json()).choices[0].message.content);
+  const content = (await res.json()).choices[0].message.content;
+  const match = content.match(/\{[\s\S]*\}/); // tolerate any surrounding text (e.g. qwen reasoning)
+  return JSON.parse(match ? match[0] : content);
 }
 
 // Store selection — branches near Kiryat Tivon:
