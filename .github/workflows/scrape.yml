@@ -4,35 +4,44 @@ on:
   workflow_dispatch:
     inputs:
       debug_term:
-        description: "If set, only dump catalog products matching this term (diagnosis)"
+        description: "__STORES__ = list branches (diagnosis only)"
         required: false
         default: ""
   schedule:
-    - cron: "0 4 * * *"   # daily ~07:00 Israel time
+    # every 3 hours, 06:00–21:00 Israel time
+    - cron: "0 3,6,9,12,15,18 * * *"
 
 permissions:
   contents: write
 
+concurrency:
+  group: scrape
+  cancel-in-progress: false
+
 jobs:
   scrape:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: "20"
+          node-version: "22"
       - name: Run scraper
         env:
           # publishedprices.co.il serves an incomplete cert chain that Node rejects.
           # This scraper only downloads PUBLIC price data, so relaxing TLS is acceptable.
           NODE_TLS_REJECT_UNAUTHORIZED: "0"
-          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
           DEBUG_TERM: ${{ github.event.inputs.debug_term }}
         run: node scrape.mjs
-      - name: Commit result.json
+      # The catalog lives alone on the `catalog` branch (force-pushed, no history),
+      # served to the app from raw.githubusercontent.com.
+      - name: Publish catalog
         run: |
+          cd out
+          git init -q -b catalog
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add result.json
-          git commit -m "update scrape result [skip ci]" || echo "no changes"
-          git push
+          git add -A
+          git commit -q -m "catalog $(date -u +%FT%TZ)"
+          git push -f "https://x-access-token:${{ github.token }}@github.com/${{ github.repository }}.git" catalog

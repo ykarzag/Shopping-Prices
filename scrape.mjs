@@ -1,7 +1,14 @@
-// Validation scraper — confirms we can download + parse price files for each
-// chain in the cloud (GitHub Actions), where the corporate proxy is not a factor.
+// Price scraper for the shopping-list app.
+//
+// Every run (GitHub Actions, several times a day):
+//   1. Downloads the official "מחירים שקופים" price feeds for the user's branches.
+//   2. Merges them by barcode into one compact catalog (out/catalog.json) that the app
+//      downloads and searches on the phone — basket compare + in-store price check.
+//   3. Pre-matches shopping-list items that have no match yet (via the Worker's /match
+//      endpoint) and stores the chosen barcodes on the item (shoppingItems/{id}.priceMatch),
+//      so the app rarely has to call the LLM live.
 import { gunzipSync, inflateRawSync } from "node:zlib";
-import { writeFileSync } from "node:fs";
+import { writeFileSync, mkdirSync } from "node:fs";
 
 // Decompress a price file: handles both gzip (Shufersal/Yohananof) and zip (Rami Levy).
 function decompress(buf) {
@@ -44,7 +51,7 @@ async function fetchRetry(url, opts = {}, tries = 3) {
   for (let i = 0; i < tries; i++) {
     try {
       const ctrl = new AbortController();
-      const to = setTimeout(() => ctrl.abort(), 25000);
+      const to = setTimeout(() => ctrl.abort(), 60000);
       const res = await fetch(url, { ...opts, signal: ctrl.signal });
       clearTimeout(to);
       return res;
@@ -53,19 +60,30 @@ async function fetchRetry(url, opts = {}, tries = 3) {
   throw last;
 }
 
+const unescapeXml = (s) =>
+  s.replace(/&quot;/g, '"').replace(/&apos;/g, "'").replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&amp;/g, "&");
+
 // ---- generic "מחירים שקופים" XML item parser ----
 function parseItems(xml) {
   const get = (b, t) => {
     const m = new RegExp(`<${t}>([\\s\\S]*?)</${t}>`).exec(b);
-    return m ? m[1].trim() : "";
+    return m ? unescapeXml(m[1].trim()) : "";
   };
   const items = [];
   for (const im of xml.matchAll(/<Item>([\s\S]*?)<\/Item>/g)) {
     const b = im[1];
-    const name = get(b, "ItemName") || get(b, "ItemNm");
+    const name = (get(b, "ItemName") || get(b, "ItemNm")).replace(/\s+/g, " ");
     const price = parseFloat(get(b, "ItemPrice"));
-    if (!name || !isFinite(price)) continue;
-    items.push({ name, price, unit: get(b, "UnitQty") || get(b, "UnitOfMeasure") || "" });
+    if (!name || !isFinite(price) || price <= 0) continue;
+    const qty = parseFloat(get(b, "Quantity"));
+    const unit = get(b, "UnitQty");
+    items.push({
+      code: get(b, "ItemCode").replace(/^0+(?=\d{8})/, ""),
+      name,
+      price,
+      size: isFinite(qty) && qty > 0 && unit && !/יחידה|לא ידוע/.test(unit) ? `${+qty.toFixed(2)} ${unit}` : "",
+      weighted: get(b, "bIsWeighted") === "1",
+    });
   }
   return items;
 }
@@ -110,179 +128,101 @@ async function cerberusSession(username) {
   const cookie = () => Object.entries(jar).map(([k, v]) => `${k}=${v}`).join("; ");
   const meta = (h) => (/name="csrftoken"\s+content="([^"]+)"/.exec(h) || [])[1];
 
-  let r = await fetch(`${BASE}/login`, { headers: { "User-Agent": UA } });
+  let r = await fetchRetry(`${BASE}/login`, { headers: { "User-Agent": UA } });
   store(r);
   const t0 = meta(await r.text());
-  r = await fetch(`${BASE}/login/user`, {
+  r = await fetchRetry(`${BASE}/login/user`, {
     method: "POST",
     headers: { "User-Agent": UA, "Content-Type": "application/x-www-form-urlencoded", Cookie: cookie() },
     body: `username=${encodeURIComponent(username)}&password=&csrftoken=${encodeURIComponent(t0)}`,
     redirect: "manual",
   });
   store(r);
-  r = await fetch(`${BASE}/file`, { headers: { "User-Agent": UA, Cookie: cookie() } });
+  r = await fetchRetry(`${BASE}/file`, { headers: { "User-Agent": UA, Cookie: cookie() } });
   store(r);
   const t1 = meta(await r.text()) || jar["csrftoken"];
-  r = await fetch(`${BASE}/file/json/dir`, {
+  r = await fetchRetry(`${BASE}/file/json/dir`, {
     method: "POST",
     headers: { "User-Agent": UA, "Content-Type": "application/x-www-form-urlencoded", Cookie: cookie() },
     body: `csrftoken=${encodeURIComponent(t1)}&iDisplayStart=0&iDisplayLength=5000&cd=%2F`,
   });
   const files = [...(await r.text()).matchAll(/"fname":"([^"]+)"/g)].map((x) => x[1]);
   const get = async (fname) =>
-    decompress(Buffer.from(await (await fetch(`${BASE}/file/d/${fname}`, { headers: { "User-Agent": UA, Cookie: cookie() } })).arrayBuffer()));
+    decompress(Buffer.from(await (await fetchRetry(`${BASE}/file/d/${fname}`, { headers: { "User-Agent": UA, Cookie: cookie() } })).arrayBuffer()));
   return { files, get };
+}
+
+// Latest file of a given kind (e.g. /pricefull/) for one store.
+function pickStoreFile(files, kind, storeId) {
+  let list = files.filter((n) => kind.test(n));
+  if (storeId) {
+    const v = new Set([String(storeId), String(Number(storeId)), String(storeId).padStart(3, "0"), String(storeId).padStart(4, "0")]);
+    const forStore = list.filter((n) => n.split(/[-.]/).some((s) => v.has(s)));
+    if (forStore.length) list = forStore;
+  }
+  list.sort();
+  return list[list.length - 1];
 }
 
 async function cerberus(username, storeId) {
   const { files, get } = await cerberusSession(username);
-  let full = files.filter((n) => /pricefull/i.test(n));
-  if (storeId) {
-    const v = new Set([String(storeId), String(Number(storeId)), String(storeId).padStart(3, "0"), String(storeId).padStart(4, "0")]);
-    const forStore = full.filter((n) => n.split(/[-.]/).some((s) => v.has(s)));
-    if (forStore.length) full = forStore;
+  const full = pickStoreFile(files, /pricefull/i, storeId);
+  if (!full) throw new Error(`no PriceFull (sample: ${files.slice(0, 3).join(", ")})`);
+  const items = parseItems(decodeXml(await get(full)));
+  // PriceFull is published about once a day; the incremental Price files carry later changes.
+  const inc = pickStoreFile(files, /^price(?!full)/i, storeId);
+  if (inc && inc.replace(/^price/i, "") > full.replace(/^pricefull/i, "")) {
+    try { applyUpdates(items, parseItems(decodeXml(await get(inc)))); } catch { /* keep the full file */ }
   }
-  full.sort();
-  const pick = full[full.length - 1];
-  if (!pick) throw new Error(`no PriceFull (sample: ${files.slice(0, 3).join(", ")})`);
-  const xml = decodeXml(await get(pick));
-  return { file: pick, items: parseItems(xml), head: xml.slice(0, 700) };
+  return { file: full, items };
 }
 
 // ---- Shufersal direct ----
-async function shufersal(storeId = 0) {
-  const list = await (await fetch(`https://prices.shufersal.co.il/FileObject/UpdateCategory?catID=2&storeId=${storeId}&page=1`)).text();
-  const m = /href="([^"]+PriceFull[^"]+\.gz[^"]*)"/.exec(list);
-  if (!m) throw new Error("no PriceFull link");
+async function shufersalFile(catID, storeId) {
+  const list = await (await fetchRetry(`https://prices.shufersal.co.il/FileObject/UpdateCategory?catID=${catID}&storeId=${storeId}&page=1`)).text();
+  const m = /href="([^"]+\.gz[^"]*)"/.exec(list);
+  if (!m) return null;
   const url = m[1].replace(/&amp;/g, "&");
-  const xml = decodeXml(decompress(Buffer.from(await (await fetch(url)).arrayBuffer())));
-  return { file: url.split("?")[0].split("/").pop(), items: parseItems(xml), head: xml.slice(0, 700) };
+  return { name: url.split("?")[0].split("/").pop(), xml: decodeXml(decompress(Buffer.from(await (await fetchRetry(url)).arrayBuffer()))) };
 }
 
-// ---- Carrefour direct (U-CODE.NET portal — structure discovery) ----
-async function carrefour() {
-  const res = await fetchRetry("https://prices.carrefour.co.il/");
-  const html = await res.text();
-  const hrefs = [...html.matchAll(/href="([^"]+)"/g)].map((m) => m[1]);
-  const actions = [...html.matchAll(/action="([^"]+)"/g)].map((m) => m[1]);
-  const gz = hrefs.filter((h) => /\.gz/i.test(h));
-  const interesting = [...new Set(hrefs.filter((h) => /file|download|price|\?|Download/i.test(h)))].slice(0, 15);
-  throw new Error(
-    `DISCOVERY status=${res.status} bytes=${html.length} | gz=${JSON.stringify(gz.slice(0, 3))} | forms=${JSON.stringify(actions.slice(0, 5))} | links=${JSON.stringify(interesting)}`
-  );
+async function shufersal(storeId) {
+  const full = await shufersalFile(2, storeId);
+  if (!full) throw new Error("no PriceFull link");
+  const items = parseItems(full.xml);
+  try {
+    const inc = await shufersalFile(1, storeId); // incremental "Price" file
+    if (inc) applyUpdates(items, parseItems(inc.xml));
+  } catch { /* keep the full file */ }
+  return { file: full.name, items };
 }
 
-// ================= pipeline =================
+// Overlay incremental price updates onto the full list (by item code).
+function applyUpdates(items, updates) {
+  const byCode = new Map(items.map((it) => [it.code, it]));
+  for (const u of updates) {
+    const it = byCode.get(u.code);
+    if (it) it.price = u.price;
+    else { items.push(u); byCode.set(u.code, u); }
+  }
+}
+
+// ================= config =================
 const FB_PROJECT = "shoppingcart300626";
 const FB_KEY = "AIzaSyAB_l1XWmRRSsd9K_Fw_pXc8ARE4EV5kFE"; // public web config key
 const FS = `https://firestore.googleapis.com/v1/projects/${FB_PROJECT}/databases/(default)/documents`;
-const GROQ_KEY = process.env.GROQ_API_KEY;
+const MATCH_URL = process.env.MATCH_URL || "https://shopping-price-compare.karzag.workers.dev/match";
+const MATCH_LIMIT = Number(process.env.MATCH_LIMIT || 60); // items matched per run (LLM rate limits)
 
-// Encode a JS value into Firestore REST typed format.
-function fsValue(v) {
-  if (v === null || v === undefined) return { nullValue: null };
-  if (typeof v === "string") return { stringValue: v };
-  if (typeof v === "boolean") return { booleanValue: v };
-  if (typeof v === "number") return Number.isInteger(v) ? { integerValue: String(v) } : { doubleValue: v };
-  if (Array.isArray(v)) return { arrayValue: { values: v.map(fsValue) } };
-  return { mapValue: { fields: Object.fromEntries(Object.entries(v).map(([k, val]) => [k, fsValue(val)])) } };
-}
-
-async function readItems() {
-  const res = await fetchRetry(`${FS}/shoppingItems?key=${FB_KEY}&pageSize=300`);
-  const data = await res.json();
-  return (data.documents || [])
-    .map((d) => ({
-      id: d.name.split("/").pop(),
-      name: d.fields?.name?.stringValue || "",
-      quantity: Number(d.fields?.quantity?.integerValue ?? d.fields?.quantity?.doubleValue ?? 1),
-    }))
-    .filter((i) => i.name);
-}
-
-async function writePriceCache(itemId, obj) {
-  const body = JSON.stringify({ fields: fsValue(obj).mapValue.fields });
-  const res = await fetchRetry(`${FS}/priceCache/${itemId}?key=${FB_KEY}`, {
-    method: "PATCH",
-    headers: { "Content-Type": "application/json" },
-    body,
-  });
-  if (!res.ok) throw new Error(`priceCache write ${res.status}: ${(await res.text()).slice(0, 200)}`);
-}
-
-// Heuristic match: prefer more query-tokens matched, then shorter name, then cheaper.
-function bestMatch(items, query) {
-  const tokens = query.toLowerCase().split(/\s+/).filter((t) => t.length >= 2);
-  if (!tokens.length) tokens.push(query.toLowerCase());
-  let best = null, bestScore = -Infinity;
-  for (const it of items) {
-    const name = it.name.toLowerCase();
-    const matched = tokens.filter((t) => name.includes(t)).length;
-    if (matched === 0) continue;
-    const score = matched * 100000 - it.name.length * 100 - it.price;
-    if (score > bestScore) { bestScore = score; best = it; }
-  }
-  return best;
-}
-
-// Prefilter: top-N catalog products that share tokens with the query.
-function candidates(items, query, n = 40) {
-  const tokens = query.toLowerCase().split(/\s+/).filter((t) => t.length >= 2);
-  if (!tokens.length) tokens.push(query.toLowerCase());
-  const scored = [];
-  for (const it of items) {
-    const name = it.name.toLowerCase();
-    const words = name.split(/[\s,.\-/()'"]+/).filter(Boolean);
-    let wordHits = 0, subHits = 0;
-    for (const t of tokens) {
-      if (words.some((w) => w === t || w.startsWith(t))) wordHits++;
-      else if (name.includes(t)) subHits++;
-    }
-    if (wordHits === 0 && subHits === 0) continue;
-    // whole-word matches dominate substring matches; shorter name as minor tiebreak
-    scored.push({ it, s: wordHits * 10000 + subHits * 100 - it.name.length });
-  }
-  scored.sort((a, b) => b.s - a.s);
-  return scored.slice(0, n).map((x) => x.it);
-}
-
-// Ask Groq to choose the best-matching candidate index per chain (real prices kept).
-async function groqPick(itemName, candByChain) {
-  const lines = Object.entries(candByChain)
-    .map(([chain, cands]) => `חנות "${chain}":\n` + (cands.length ? cands.map((c, i) => `  ${i}. ${c.name} — ₪${c.price}`).join("\n") : "  (אין מועמדים)"))
-    .join("\n\n");
-  const prompt = `המשתמש רוצה לקנות מוצר בשם: "${itemName}".
-לכל חנות, בחר את ה-index של המוצר ברשימה שהכי מתאים מבחינת *סוג המוצר* שהמשתמש מתכוון אליו — לא חייב אותן מילים בדיוק, אלא אותו מוצר במהות.
-דוגמאות: "מוצרלה פרסקה" = מוצרלה טרייה / כדור מוצרלה טרי; "קולה" = קוקה קולה / משקה קולה (לא "רוקולה"); "בצל" = בצל יבש טרי (לא חטיף בטעם בצל); "שמן רגיל" = שמן קנולה/חמניות לבישול.
-כלל ראשון ומכריע: התאמה לפי **סוג המוצר** הנכון. אל תבחר מוצר מסוג אחר רק כי הוא זול יותר (למשל "אסאדו/כתף" הוא בשר, לא "פקאן מסוכר").
-המחיר מוצג רק כדי להימנע מחריגים: בין מוצרים **מאותו סוג**, העדף אריזה צרכנית רגילה והימנע מפריט בודד עם מחיר חריג-גבוה שהוא תפזורת/סיטונאות (למשל בזיליקום ב-₪80 כשיש אריזות ב-₪5-10).
-החזר -1 רק אם באמת אין ברשימה מוצר מאותו סוג.
-החזר JSON בלבד במבנה: { "שופרסל": number, "רמי לוי": number, "יוחננוף": number }
-
-${lines}`;
-  const res = await fetch("https://api.groq.com/openai/v1/chat/completions", {
-    method: "POST",
-    headers: { "Content-Type": "application/json", Authorization: `Bearer ${GROQ_KEY}` },
-    body: JSON.stringify({
-      model: process.env.GROQ_MODEL || "qwen/qwen3-32b",
-      messages: [{ role: "user", content: prompt }],
-      response_format: { type: "json_object" },
-      temperature: 0,
-    }),
-  });
-  if (!res.ok) throw new Error(`groq ${res.status}: ${(await res.text()).slice(0, 150)}`);
-  const content = (await res.json()).choices[0].message.content;
-  const match = content.match(/\{[\s\S]*\}/); // tolerate any surrounding text (e.g. qwen reasoning)
-  return JSON.parse(match ? match[0] : content);
-}
-
-// Store selection — branches near Kiryat Tivon:
+// Branches near Kiryat Tivon:
 //   Shufersal 98 = דיל קרית טבעון אלונים · Rami Levy 062 = צק פוסט חיפה · Yohananof 013 = חוצות המפרץ
 const CHAINS = [
-  ["שופרסל", () => shufersal(98)],
-  ["רמי לוי", () => cerberus("RamiLevi", "062")],
-  ["יוחננוף", () => cerberus("yohananof", "013")],
+  { name: "שופרסל", branch: "דיל קרית טבעון", load: () => shufersal(98) },
+  { name: "רמי לוי", branch: "צ'ק פוסט חיפה", load: () => cerberus("RamiLevi", "062") },
+  { name: "יוחננוף", branch: "חוצות המפרץ", load: () => cerberus("yohananof", "013") },
 ];
+
+mkdirSync("out", { recursive: true });
 
 // Store discovery mode: find the user's branches and their StoreIds.
 if (process.env.DEBUG_TERM === "__STORES__") {
@@ -293,87 +233,217 @@ if (process.env.DEBUG_TERM === "__STORES__") {
     try {
       const { files, get } = await cerberusSession(user);
       const sf = files.find((n) => /storesfull/i.test(n)) || files.find((n) => /stores/i.test(n));
-      const xml = decodeXml(await get(sf));
-      const stores = parseStores(xml);
-      out[label] = { file: sf, total: stores.length, all: stores.map((s) => `${s.id} | ${s.name} | ${s.city} | ${s.address}`), head: stores.length ? undefined : xml.slice(0, 500) };
+      const stores = parseStores(decodeXml(await get(sf)));
+      out[label] = { file: sf, total: stores.length, all: stores.map((s) => `${s.id} | ${s.name} | ${s.city} | ${s.address}`) };
     } catch (e) { out[label] = { error: e.message }; }
   }
   try {
-    const list = await (await fetch("https://prices.shufersal.co.il/FileObject/UpdateCategory?catID=5&storeId=0&page=1")).text();
-    const m = /href="([^"]+\.gz[^"]*)"/.exec(list);
-    const xml = decodeXml(decompress(Buffer.from(await (await fetch(m[1].replace(/&amp;/g, "&"))).arrayBuffer())));
-    const stores = parseStores(xml);
-    out["שופרסל"] = { total: stores.length, matches: stores.filter(hit), head: stores.length ? undefined : xml.slice(0, 500) };
+    const f = await shufersalFile(5, 0);
+    const stores = parseStores(f.xml);
+    out["שופרסל"] = { total: stores.length, matches: stores.filter(hit) };
   } catch (e) { out["שופרסל"] = { error: e.message }; }
-  writeFileSync("result.json", JSON.stringify(out, null, 2));
+  writeFileSync("out/result.json", JSON.stringify(out, null, 2));
   console.log("stores debug written");
   process.exit(0);
 }
 
-const result = { ranAt: new Date().toISOString(), chains: {}, items: [] };
-const catalogs = {};
-for (const [label, fn] of CHAINS) {
-  console.log(`\n========== ${label} ==========`);
+// ================= 1. download =================
+const ranAt = new Date().toISOString();
+const result = { ranAt, chains: {}, matched: [] };
+const catalogs = [];
+for (const chain of CHAINS) {
   try {
-    const { items } = await fn();
-    catalogs[label] = items;
-    result.chains[label] = { ok: true, count: items.length };
-    console.log(`OK: ${items.length} items`);
+    const { file, items } = await chain.load();
+    catalogs.push(items);
+    result.chains[chain.name] = { ok: true, file, count: items.length };
+    console.log(`${chain.name}: ${items.length} items (${file})`);
   } catch (e) {
-    catalogs[label] = [];
-    result.chains[label] = { ok: false, error: e.message, cause: e.cause?.code || "" };
-    console.log(`FAILED: ${e.message}`);
+    catalogs.push([]);
+    result.chains[chain.name] = { ok: false, error: e.message, cause: e.cause?.code || "" };
+    console.log(`${chain.name}: FAILED ${e.message}`);
   }
 }
+if (process.env.DUMP_RAW) writeFileSync("out/raw.json", JSON.stringify(catalogs));
+if (catalogs.every((c) => c.length === 0)) {
+  console.log("no chain downloaded — keeping the previous catalog");
+  process.exit(1);
+}
 
-if (process.env.DEBUG_TERM) {
-  const term = process.env.DEBUG_TERM;
-  const toks = term.toLowerCase().split(/\s+/).filter((t) => t.length >= 2);
-  const dbg = {};
-  for (const [label] of CHAINS) {
-    dbg[label] = (catalogs[label] || [])
-      .filter((it) => toks.some((t) => it.name.toLowerCase().includes(t)))
-      .slice(0, 50)
-      .map((it) => `₪${it.price} ${it.name}`);
+// ================= 2. merge into one catalog =================
+// A real barcode (EAN, 8–14 digits) is shared across chains. In-store codes are not:
+// weighed items (13 digits starting with 2) and produce PLUs (7290000000xxx — e.g.
+// 7290000000138 is כרוב לבן in one chain and בטטה in another). Those are keyed "<chain>:<code>".
+const isSharedCode = (c) => /^\d{8,14}$/.test(c) && !(c.length === 13 && c[0] === "2") && !/^7290000000\d{3}$/.test(c);
+const products = new Map(); // key -> [key, name, size, weighted, p0, p1, p2]
+catalogs.forEach((items, ci) => {
+  for (const it of items) {
+    if (!it.code) continue;
+    const key = isSharedCode(it.code) ? it.code : `${ci}:${it.code}`;
+    let p = products.get(key);
+    if (!p) {
+      p = [key, it.name, it.size, it.weighted ? 1 : 0, ...CHAINS.map(() => null)];
+      products.set(key, p);
+    } else if (it.name.length > p[1].length) {
+      p[1] = it.name; // keep the most descriptive name
+    }
+    p[4 + ci] = it.price;
+    if (!p[2] && it.size) p[2] = it.size;
   }
-  writeFileSync("result.json", JSON.stringify({ debugTerm: term, matches: dbg }, null, 2));
-  console.log("debug written for", term);
+});
+const catalog = {
+  updated: ranAt,
+  chains: CHAINS.map((c) => c.name),
+  branches: CHAINS.map((c) => c.branch),
+  // columns: key, name, size, weighted, price per chain (null = not sold there)
+  products: [...products.values()],
+};
+writeFileSync("out/catalog.json", JSON.stringify(catalog));
+result.catalogProducts = catalog.products.length;
+console.log(`catalog: ${catalog.products.length} products`);
+
+if (process.env.SKIP_MATCH) {
+  writeFileSync("out/result.json", JSON.stringify(result, null, 2));
   process.exit(0);
 }
 
-const items = await readItems();
-console.log(`\nread ${items.length} shopping items from Firestore`);
-let written = 0;
-for (const item of items) {
-  const candByChain = {};
-  for (const [label] of CHAINS) candByChain[label] = candidates(catalogs[label], item.name);
+// ================= 3. pre-match shopping items =================
+// Candidate selection — keep in sync with src/lib/priceMatch.js in the app.
+// Hebrew-aware tokens: final letters unified, common plural/feminine endings stripped,
+// so "עגבניות" finds "עגבניה" and "מלפפונים" finds "מלפפון".
+const FINALS = { "ך": "כ", "ם": "מ", "ן": "נ", "ף": "פ", "ץ": "צ" };
+const normalize = (s) => s.toLowerCase().replace(/["'״׳`]/g, "").replace(/[ךםןףץ]/g, (c) => FINALS[c]).replace(/[^\p{L}\p{N}%.]+/gu, " ").trim();
+const stem = (w) => (w.length > 4 && w.endsWith("יות") ? w.slice(0, -3) : w.length > 3 && /(ות|ימ)$/.test(w) ? w.slice(0, -2) : w.length > 3 && w.endsWith("ה") ? w.slice(0, -1) : w);
+const P = catalog.products.map((p) => {
+  const n = normalize(p[1]);
+  return { p, n, words: n.split(" ").map(stem) };
+});
 
-  let picks = null;
-  try {
-    picks = await groqPick(item.name, candByChain);
-  } catch (e) {
-    console.log(`  groq failed for ${item.name}: ${e.message} — using heuristic`);
+function tokenScore(t, words, name) {
+  let best = 0;
+  for (const w of words) {
+    if (w === t) return 3;
+    if (w.startsWith(t) || (w.length > t.length && "הובלמש".includes(w[0]) && w.slice(1).startsWith(t))) best = 2;
   }
-
-  const prices = [];
-  for (const [label] of CHAINS) {
-    let cand = null;
-    if (picks) {
-      const idx = Number(picks[label]);
-      if (Number.isInteger(idx) && idx >= 0 && candByChain[label][idx]) cand = candByChain[label][idx];
-    } else {
-      cand = bestMatch(catalogs[label], item.name); // fallback when Groq unavailable
-    }
-    if (cand) prices.push({ store: label, matchedName: cand.name, price: cand.price, unit: cand.unit });
-  }
-
-  try {
-    await writePriceCache(item.id, { itemName: item.name, updated: result.ranAt, prices });
-    written++;
-  } catch (e) {
-    console.log(`  write failed for ${item.name}: ${e.message}`);
-  }
-  result.items.push({ name: item.name, matches: prices.map((p) => `${p.store} ₪${p.price} (${p.matchedName})`) });
+  return best || (name.includes(t) ? 1 : 0);
 }
-console.log(`wrote ${written}/${items.length} priceCache docs`);
-writeFileSync("result.json", JSON.stringify(result, null, 2));
+
+// Multi-packs ("מארז", "4 * 1 ליטר", "שישיית") — pushed down unless the user asked for one.
+const MULTIPACK = /מארז|שישי|רביעי|\d\s*[*xX×]\s*\d/;
+
+function candidates(query, n = 15) {
+  const tokens = normalize(query).split(" ").filter((t) => t.length >= 2).map(stem);
+  if (!tokens.length) return [];
+  const wantsPack = MULTIPACK.test(query);
+  const scored = [];
+  for (const { p, n: name, words } of P) {
+    let sum = 0, hit = 0;
+    for (const t of tokens) {
+      const ts = tokenScore(t, words, name);
+      sum += ts;
+      if (ts) hit++;
+    }
+    if (!hit) continue;
+    const chains = p.slice(4).filter((x) => x != null).length;
+    // extra words beyond the query cost points, so "מלפפון" beats "מלפפון במלח 7-9 560 גרם"
+    const extra = Math.max(0, words.filter((w) => !/^\d/.test(w)).length - tokens.length);
+    scored.push({ p, s: (hit === tokens.length ? 50000 : 0) + sum * 10000 + (words[0].startsWith(tokens[0]) ? 3000 : 0) - extra * 800 - (!wantsPack && MULTIPACK.test(p[1]) ? 20000 : 0) + chains * 60 - name.length * 3 });
+  }
+  scored.sort((a, b) => b.s - a.s);
+  // best overall, plus the best few per chain so every chain has options
+  const picked = new Set(scored.slice(0, n).map((x) => x.p));
+  CHAINS.forEach((_, ci) => scored.filter((x) => x.p[4 + ci] != null).slice(0, 8).forEach((x) => picked.add(x.p)));
+  return [...picked];
+}
+
+const toCand = (p) => ({ n: p[1], q: p[2], w: p[3], p: Object.fromEntries(CHAINS.map((c, ci) => [c.name, p[4 + ci]]).filter(([, v]) => v != null)) });
+
+function fsValue(v) {
+  if (v === null || v === undefined) return { nullValue: null };
+  if (typeof v === "string") return { stringValue: v };
+  if (typeof v === "boolean") return { booleanValue: v };
+  if (typeof v === "number") return Number.isInteger(v) ? { integerValue: String(v) } : { doubleValue: v };
+  if (Array.isArray(v)) return { arrayValue: { values: v.map(fsValue) } };
+  return { mapValue: { fields: Object.fromEntries(Object.entries(v).map(([k, val]) => [k, fsValue(val)])) } };
+}
+
+async function readItems() {
+  const out = [];
+  let token = "";
+  do {
+    const data = await (await fetchRetry(`${FS}/shoppingItems?key=${FB_KEY}&pageSize=300${token ? `&pageToken=${token}` : ""}`)).json();
+    for (const d of data.documents || []) {
+      const f = d.fields || {};
+      const pm = f.priceMatch?.mapValue?.fields;
+      out.push({
+        id: d.name.split("/").pop(),
+        name: f.name?.stringValue || "",
+        quantity: Number(f.quantity?.integerValue ?? f.quantity?.doubleValue ?? 1),
+        match: pm ? { name: pm.name?.stringValue, manual: !!pm.manual?.booleanValue } : null,
+      });
+    }
+    token = data.nextPageToken;
+  } while (token);
+  return out.filter((i) => i.name);
+}
+
+async function writeMatch(id, priceMatch) {
+  // updateMask touches only priceMatch; exists=true never resurrects a deleted item
+  const url = `${FS}/shoppingItems/${id}?key=${FB_KEY}&updateMask.fieldPaths=priceMatch&currentDocument.exists=true`;
+  const res = await fetchRetry(url, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ fields: { priceMatch: fsValue(priceMatch) } }),
+  });
+  if (!res.ok) throw new Error(`write ${res.status}: ${(await res.text()).slice(0, 150)}`);
+}
+
+// DRY_ITEMS="a,b,c": match these names without touching Firestore (local testing)
+const DRY = process.env.DRY_ITEMS?.split(",").map((name, i) => ({ id: "t" + i, name, quantity: 1, match: null }));
+const shopping = DRY || await readItems();
+// needs (re)matching: never matched, or renamed since an automatic match
+const todo = shopping
+  .filter((i) => !i.match || (!i.match.manual && i.match.name !== i.name))
+  .sort((a, b) => (b.quantity > 0) - (a.quantity > 0)) // items to buy first
+  .slice(0, MATCH_LIMIT);
+console.log(`shopping items: ${shopping.length}, to match this run: ${todo.length}`);
+
+const BATCH = 2;
+for (let i = 0; i < todo.length; i += BATCH) {
+  const batch = todo.slice(i, i + BATCH).map((it) => ({ ...it, cands: candidates(it.name) }));
+  let picks;
+  try {
+    const res = await fetchRetry(MATCH_URL, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ items: batch.map((b) => ({ id: b.id, name: b.name, cands: b.cands.map(toCand) })) }),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || String(res.status));
+    picks = data.results;
+  } catch (e) {
+    console.log(`  match failed (${batch.map((b) => b.name).join(", ")}): ${e.message}`);
+    if (/429|rate/i.test(e.message)) break; // out of LLM quota — the next run continues
+    continue;
+  }
+  for (const b of batch) {
+    const pick = picks?.[b.id] || {};
+    const codes = {};
+    CHAINS.forEach((c, ci) => {
+      const cand = b.cands[pick[c.name]];
+      if (cand && cand[4 + ci] != null) codes[c.name] = cand[0];
+    });
+    try {
+      if (!DRY) await writeMatch(b.id, { name: b.name, codes, manual: false, at: ranAt });
+      const show = CHAINS.map((c, ci) => {
+        const p = codes[c.name] && products.get(codes[c.name]);
+        return p ? `${c.name}=${p[1]} ₪${p[4 + ci]}` : `${c.name}=—`;
+      });
+      result.matched.push(`${b.name}: ${show.join(" | ")}`);
+    } catch (e) {
+      console.log(`  ${e.message} (${b.name})`);
+    }
+  }
+  await new Promise((r) => setTimeout(r, 4000)); // spread LLM token usage
+}
+console.log(`matched ${result.matched.length} items`);
+writeFileSync("out/result.json", JSON.stringify(result, null, 2));
