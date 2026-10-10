@@ -244,7 +244,8 @@ const CHAINS = [
   { name: "שופרסל", branch: "דיל קרית טבעון", load: () => shufersal(98) },
   { name: "רמי לוי", branch: "צ'ק פוסט חיפה", load: () => cerberus("RamiLevi", "062") },
   { name: "יוחננוף", branch: "חוצות המפרץ", load: () => cerberus("yohananof", "013") },
-  { name: "ויקטורי", branch: "טבעון", load: () => laib("7290696200003", "086") },
+  // disabled: laibcatalog.co.il is geo-blocked from GitHub Actions/Cloudflare (works only from an Israeli IP)
+  { name: "ויקטורי", branch: "טבעון", load: () => laib("7290696200003", "086"), disabled: true },
   { name: "סלאח דבאח", branch: "צ'ק פוסט", load: () => cerberus("SalachD", "019") },
 ];
 const CATALOG_URL = "https://raw.githubusercontent.com/ykarzag/Shopping-Prices/catalog/catalog.json";
@@ -293,6 +294,11 @@ const catalogs = [];
 const chainUpdated = []; // when each chain's prices were downloaded
 let fresh = 0;
 for (const chain of CHAINS) {
+  if (chain.disabled) { // keeps its column (and every later chain's index) but has no prices
+    catalogs.push([]);
+    chainUpdated.push(null);
+    continue;
+  }
   try {
     const { file, items } = await chain.load();
     catalogs.push(items);
