@@ -70,8 +70,9 @@ function parseItems(xml) {
     return m ? unescapeXml(m[1].trim()) : "";
   };
   const items = [];
-  for (const im of xml.matchAll(/<Item>([\s\S]*?)<\/Item>/g)) {
-    const b = im[1];
+  // most chains use <Item>; the laibcatalog (Victory) files may use <Product>
+  for (const im of xml.matchAll(/<(Item|Product)>([\s\S]*?)<\/\1>/g)) {
+    const b = im[2];
     const name = (get(b, "ItemName") || get(b, "ItemNm")).replace(/\s+/g, " ");
     const price = parseFloat(get(b, "ItemPrice"));
     if (!name || !isFinite(price) || price <= 0) continue;
@@ -197,6 +198,26 @@ async function shufersal(storeId) {
   return { file: full.name, items };
 }
 
+// ---- laibcatalog.co.il (Victory, Mahsanei Hashuk, H. Cohen) ----
+// The home page lists the files published today; the chains there don't publish on Shabbat,
+// in which case this throws and the previous run's prices are reused.
+async function laib(chainId, branch) {
+  const BASE = "https://laibcatalog.co.il/";
+  const html = await (await fetchRetry(BASE, { headers: { "User-Agent": UA } })).text();
+  const hrefs = [...html.matchAll(/href='([^']+\.(?:xml\.)?gz)'/g)].map((m) => m[1].replace(/\\/g, "/"));
+  const latest = (kind) =>
+    hrefs.filter((h) => new RegExp(`/${kind}${chainId}-\\d+-${branch}-`, "i").test(h)).sort().pop();
+  const full = latest("PriceFull");
+  if (!full) throw new Error(`no PriceFull for ${chainId}-${branch} on laibcatalog (${hrefs.length} files listed)`);
+  const get = async (h) => decodeXml(decompress(Buffer.from(await (await fetchRetry(BASE + h, { headers: { "User-Agent": UA } })).arrayBuffer())));
+  const items = parseItems(await get(full));
+  const inc = latest("Price");
+  if (inc && inc.split("/").pop().replace(/^price/i, "") > full.split("/").pop().replace(/^pricefull/i, "")) {
+    try { applyUpdates(items, parseItems(await get(inc))); } catch { /* keep the full file */ }
+  }
+  return { file: full.split("/").pop(), items };
+}
+
 // Overlay incremental price updates onto the full list (by item code).
 function applyUpdates(items, updates) {
   const byCode = new Map(items.map((it) => [it.code, it]));
@@ -216,11 +237,29 @@ const MATCH_LIMIT = Number(process.env.MATCH_LIMIT || 60); // items matched per 
 
 // Branches near Kiryat Tivon:
 //   Shufersal 98 = דיל קרית טבעון אלונים · Rami Levy 062 = צק פוסט חיפה · Yohananof 013 = חוצות המפרץ
+//   Victory 086 = טבעון · Salah Dabbah 019 = צק פוסט
+// Only ever APPEND chains: in-store codes are keyed by chain index ("<i>:<code>") and those
+// keys are saved in the items' priceMatch.
 const CHAINS = [
   { name: "שופרסל", branch: "דיל קרית טבעון", load: () => shufersal(98) },
   { name: "רמי לוי", branch: "צ'ק פוסט חיפה", load: () => cerberus("RamiLevi", "062") },
   { name: "יוחננוף", branch: "חוצות המפרץ", load: () => cerberus("yohananof", "013") },
+  { name: "ויקטורי", branch: "טבעון", load: () => laib("7290696200003", "086") },
+  { name: "סלאח דבאח", branch: "צ'ק פוסט", load: () => cerberus("SalachD", "019") },
 ];
+const CATALOG_URL = "https://raw.githubusercontent.com/ykarzag/Shopping-Prices/catalog/catalog.json";
+
+// A chain that failed this run keeps its prices from the previously published catalog.
+async function previousPrices(chainName) {
+  const prev = await (await fetchRetry(CATALOG_URL)).json();
+  const ci = prev.chains.indexOf(chainName);
+  if (ci < 0) return null;
+  const items = prev.products
+    .filter((p) => p[4 + ci] != null)
+    .map((p) => ({ code: p[0].replace(/^\d+:/, ""), name: p[1], size: p[2], weighted: !!p[3], price: p[4 + ci] }));
+  const updated = prev.chainUpdated?.[ci] || prev.updated;
+  return { items, updated };
+}
 
 mkdirSync("out", { recursive: true });
 
@@ -251,20 +290,31 @@ if (process.env.DEBUG_TERM === "__STORES__") {
 const ranAt = new Date().toISOString();
 const result = { ranAt, chains: {}, matched: [] };
 const catalogs = [];
+const chainUpdated = []; // when each chain's prices were downloaded
+let fresh = 0;
 for (const chain of CHAINS) {
   try {
     const { file, items } = await chain.load();
     catalogs.push(items);
+    chainUpdated.push(ranAt);
+    fresh++;
     result.chains[chain.name] = { ok: true, file, count: items.length };
     console.log(`${chain.name}: ${items.length} items (${file})`);
   } catch (e) {
-    catalogs.push([]);
     result.chains[chain.name] = { ok: false, error: e.message, cause: e.cause?.code || "" };
     console.log(`${chain.name}: FAILED ${e.message}`);
+    let prev = null;
+    try { prev = await previousPrices(chain.name); } catch { /* no previous catalog */ }
+    catalogs.push(prev?.items || []);
+    chainUpdated.push(prev?.updated || null);
+    if (prev) {
+      result.chains[chain.name].reused = { count: prev.items.length, from: prev.updated };
+      console.log(`  reusing ${prev.items.length} prices from ${prev.updated}`);
+    }
   }
 }
 if (process.env.DUMP_RAW) writeFileSync("out/raw.json", JSON.stringify(catalogs));
-if (catalogs.every((c) => c.length === 0)) {
+if (!fresh) {
   console.log("no chain downloaded — keeping the previous catalog");
   process.exit(1);
 }
@@ -294,6 +344,7 @@ const catalog = {
   updated: ranAt,
   chains: CHAINS.map((c) => c.name),
   branches: CHAINS.map((c) => c.branch),
+  chainUpdated, // per chain: when its prices were downloaded (null = no data yet)
   // columns: key, name, size, weighted, price per chain (null = not sold there)
   products: [...products.values()],
 };
@@ -351,7 +402,7 @@ function candidates(query, n = 15) {
   scored.sort((a, b) => b.s - a.s);
   // best overall, plus the best few per chain so every chain has options
   const picked = new Set(scored.slice(0, n).map((x) => x.p));
-  CHAINS.forEach((_, ci) => scored.filter((x) => x.p[4 + ci] != null).slice(0, 8).forEach((x) => picked.add(x.p)));
+  CHAINS.forEach((_, ci) => scored.filter((x) => x.p[4 + ci] != null).slice(0, 6).forEach((x) => picked.add(x.p)));
   return [...picked];
 }
 
@@ -378,7 +429,15 @@ async function readItems() {
         id: d.name.split("/").pop(),
         name: f.name?.stringValue || "",
         quantity: Number(f.quantity?.integerValue ?? f.quantity?.doubleValue ?? 1),
-        match: pm ? { name: pm.name?.stringValue, manual: !!pm.manual?.booleanValue } : null,
+        match: pm
+          ? {
+              name: pm.name?.stringValue,
+              manual: !!pm.manual?.booleanValue,
+              codes: Object.fromEntries(Object.entries(pm.codes?.mapValue?.fields || {}).map(([k, v]) => [k, v.stringValue])),
+              // matches made before chains were tracked covered the first three chains
+              chains: pm.chains?.arrayValue?.values?.map((v) => v.stringValue) || CHAINS.slice(0, 3).map((c) => c.name),
+            }
+          : null,
       });
     }
     token = data.nextPageToken;
@@ -400,9 +459,19 @@ async function writeMatch(id, priceMatch) {
 // DRY_ITEMS="a,b,c": match these names without touching Firestore (local testing)
 const DRY = process.env.DRY_ITEMS?.split(",").map((name, i) => ({ id: "t" + i, name, quantity: 1, match: null }));
 const shopping = DRY || await readItems();
-// needs (re)matching: never matched, or renamed since it was matched
+const ACTIVE = CHAINS.filter((_, ci) => catalogs[ci].length).map((c) => c.name); // chains with prices
+// A rename means a fresh match. A chain added since the last match only fills that chain in —
+// the existing (possibly manual) picks for the other chains are kept.
+const renamed = (i) => i.match?.name !== i.name;
+// (a chain that sells one of the already-matched barcodes is covered — the app uses it directly)
+const missingChains = (i) =>
+  ACTIVE.filter((c) => {
+    if (i.match?.chains.includes(c)) return false;
+    const ci = CHAINS.findIndex((x) => x.name === c);
+    return !Object.values(i.match?.codes || {}).some((k) => products.get(k)?.[4 + ci] != null);
+  });
 const todo = shopping
-  .filter((i) => i.match?.name !== i.name)
+  .filter((i) => renamed(i) || missingChains(i).length)
   .sort((a, b) => (b.quantity > 0) - (a.quantity > 0)) // items to buy first
   .slice(0, MATCH_LIMIT);
 console.log(`shopping items: ${shopping.length}, to match this run: ${todo.length}`);
@@ -415,7 +484,7 @@ for (let i = 0; i < todo.length; i += BATCH) {
     const res = await fetchRetry(MATCH_URL, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ items: batch.map((b) => ({ id: b.id, name: b.name, cands: b.cands.map(toCand) })) }),
+      body: JSON.stringify({ chains: ACTIVE, items: batch.map((b) => ({ id: b.id, name: b.name, cands: b.cands.map(toCand) })) }),
     });
     const data = await res.json();
     if (!res.ok) throw new Error(data.error || String(res.status));
@@ -427,13 +496,16 @@ for (let i = 0; i < todo.length; i += BATCH) {
   }
   for (const b of batch) {
     const pick = picks?.[b.id] || {};
-    const codes = {};
+    const keep = !renamed(b) && b.match ? b.match : null; // only new chains are being added
+    const codes = keep ? { ...keep.codes } : {};
     CHAINS.forEach((c, ci) => {
+      if (keep?.chains.includes(c.name)) return;
       const cand = b.cands[pick[c.name]];
       if (cand && cand[4 + ci] != null) codes[c.name] = cand[0];
     });
+    const chains = [...new Set([...(keep?.chains || []), ...ACTIVE])];
     try {
-      if (!DRY) await writeMatch(b.id, { name: b.name, codes, manual: false, at: ranAt });
+      if (!DRY) await writeMatch(b.id, { name: b.name, codes, chains, manual: !!keep?.manual, at: ranAt });
       const show = CHAINS.map((c, ci) => {
         const p = codes[c.name] && products.get(codes[c.name]);
         return p ? `${c.name}=${p[1]} ₪${p[4 + ci]}` : `${c.name}=—`;

@@ -5,7 +5,8 @@ Price feed for the [רשימת קניות](https://shopping-list-app.karzag.work
 Runs in **GitHub Actions** every 3 hours (06:00–21:00 Israel time). Each run:
 
 1. Downloads the official "מחירים שקופים" price files (full + latest incremental) for the family's branches:
-   Shufersal 98 (דיל קרית טבעון), Rami Levy 062 (צ'ק פוסט חיפה), Yohananof 013 (חוצות המפרץ).
+   Shufersal 98 (דיל קרית טבעון), Rami Levy 062 (צ'ק פוסט חיפה), Yohananof 013 (חוצות המפרץ),
+   Victory 086 (טבעון, via laibcatalog.co.il — no files on Shabbat, previous prices are kept), Salah Dabbah 019 (צ'ק פוסט).
 2. Merges them by barcode into one catalog and publishes it to the **`catalog` branch**:
    `https://raw.githubusercontent.com/ykarzag/Shopping-Prices/catalog/catalog.json`
    (`result.json` next to it has the run summary).
