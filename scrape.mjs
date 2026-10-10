@@ -400,9 +400,9 @@ async function writeMatch(id, priceMatch) {
 // DRY_ITEMS="a,b,c": match these names without touching Firestore (local testing)
 const DRY = process.env.DRY_ITEMS?.split(",").map((name, i) => ({ id: "t" + i, name, quantity: 1, match: null }));
 const shopping = DRY || await readItems();
-// needs (re)matching: never matched, or renamed since an automatic match
+// needs (re)matching: never matched, or renamed since it was matched
 const todo = shopping
-  .filter((i) => !i.match || (!i.match.manual && i.match.name !== i.name))
+  .filter((i) => i.match?.name !== i.name)
   .sort((a, b) => (b.quantity > 0) - (a.quantity > 0)) // items to buy first
   .slice(0, MATCH_LIMIT);
 console.log(`shopping items: ${shopping.length}, to match this run: ${todo.length}`);
